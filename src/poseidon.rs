@@ -10,6 +10,12 @@ pub trait Sponge {
     fn hash();
 }
 
+#[derive(PartialEq)]
+pub enum PoseidonHashType {
+    MerkleTree,
+    ConstInputLen,
+}
+
 pub struct PoseidonParams {
     t: usize,
     alpha: usize,
@@ -31,8 +37,8 @@ fn load_constants(t: usize, num_f: usize, num_p: usize) -> (Vec<Vec<Fr>>, Vec<Fr
     let m_str = &m_strij[t];
 
     let mut round_constants: Vec<Fr> = Vec::with_capacity(t * (num_f + num_p));
-    for i in 0..t {
-        let a: Fr = Fr::from_str(c_str[i]).expect("a");
+    for c_str_i in c_str.iter().take(t * (num_f + num_p)) {
+        let a: Fr = Fr::from_str(c_str_i).expect("a");
         round_constants.push(a);
     }
 
@@ -81,9 +87,20 @@ impl PoseidonParams {
 }
 
 impl Poseidon {
-    fn new(t: usize, state: Vec<Fr>) -> Self {
+    pub fn new(mut state: Vec<Fr>, hash_type: PoseidonHashType) -> Self {
+        let t = state.len() + 1;
+
+        let domain_tag = if hash_type == PoseidonHashType::MerkleTree {
+            ((2 ^ state.len()) + 1) as u128
+        } else {
+            (2 ^ 64) * state.len() as u128
+        };
+
+        // let domain_tag_fr = BigInt::from(domain_tag);
+        let mut new_state: Vec<Fr> = vec![Fr::zero()];
+        new_state.append(&mut state);
         Poseidon {
-            state,
+            state: new_state,
             params: PoseidonParams::new(t),
         }
     }
@@ -111,19 +128,25 @@ impl Poseidon {
         }
     }
 
-    fn mix(&mut self, round_i: usize) {
-        let mut new_state: Vec<Fr> = Vec::with_capacity(self.params.width());
-        for (i, new_state_i) in new_state.iter_mut().enumerate().take(self.params.width()) {
-            *new_state_i = Fr::zero();
+    fn product_mds(&mut self, round_i: usize) {
+        let mut new_state: Vec<Fr> = Vec::with_capacity(self.params.width() + 1);
+        for i in 0..self.params.width() {
+            let mut new_state_i = Fr::zero();
             for j in 0..self.params.width() {
-                *new_state_i += self.state[j] * self.params.mds_matrix[i][j];
+                new_state_i += self.state[j] * self.params.mds_matrix[i][j];
             }
+            new_state.push(new_state_i);
         }
         self.state = new_state
     }
 
-    fn ark(&mut self, ith: usize) {
+    fn add_round_constants(&mut self, ith: usize) {
         for i in 0..self.params.width() {
+            // println!(
+            //     "ark: {:?}, state: {:?}",
+            //     self.params.round_constants.len(),
+            //     self.state.len()
+            // );
             self.state[i] += &self.params.round_constants[ith * self.params.width() + i];
         }
     }
@@ -131,12 +154,16 @@ impl Poseidon {
     pub fn hash(&mut self) -> Result<Fr, String> {
         let num_rounds = self.params.num_f + self.params.num_p;
         for i in 0..num_rounds {
-            self.ark(i);
+            // println!("start round_i: {}, state: {:?}", i, self.state.len());
+            self.add_round_constants(i);
+            // println!("ark round_i: {}, state: {:?}", i, self.state.len());
             self.sbox(i);
-            self.mix(i);
+            // println!("sbox round_i: {}, state: {:?}", i, self.state.len());
+            self.product_mds(i);
+            // println!("end round_i: {}, state: {:?}", i, self.state.len());
         }
 
-        Ok(self.state[0])
+        Ok(self.state[1])
     }
 }
 
@@ -147,10 +174,14 @@ mod tests {
     #[test]
     fn test_works() {
         let state: Vec<Fr> = vec![Fr::from(1), Fr::from(2)];
-        let mut pos = Poseidon::new(2, state);
+        let mut pos = Poseidon::new(state, PoseidonHashType::ConstInputLen);
 
         println!("state: {:?}", pos.state);
+        println!("round_constants: {:?}", pos.params.round_constants.len());
         let out = pos.hash().unwrap_or(Fr::zero());
-        println!("out: {}", out);
+        assert_eq!(
+            out.to_string(),
+            "702818956448241653665554182341769666231371233761698089559867315561525558590"
+        )
     }
 }
